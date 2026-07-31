@@ -25,9 +25,46 @@
 #include <getopt.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include "alsactl.h"
+
+#if SND_LIB_VER(1, 2, 16) >= SND_LIB_VERSION
+/* compat implementation for alsa-lib versions without snd_config_get_llong() */
+static int snd_config_get_llong(const snd_config_t *config, long long *ptr, int base)
+{
+	const char *str;
+	char *endptr;
+	long lval;
+	int err;
+
+	switch (snd_config_get_type(config)) {
+	case SND_CONFIG_TYPE_INTEGER:
+		err = snd_config_get_integer(config, &lval);
+		if (err < 0)
+			return err;
+		*ptr = lval;
+		return 0;
+	case SND_CONFIG_TYPE_INTEGER64:
+		return snd_config_get_integer64(config, ptr);
+	case SND_CONFIG_TYPE_STRING:
+		err = snd_config_get_string(config, &str);
+		if (err < 0)
+			return err;
+		if (str == NULL || *str == '\0')
+			return -EINVAL;
+		errno = 0;
+		*ptr = strtoll(str, &endptr, base);
+		if (errno != 0 || *endptr != '\0')
+			return -EINVAL;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+#endif
 
 static int linked_cards[16];
 
@@ -787,19 +824,25 @@ static int config_enumerated(snd_config_t *n, snd_ctl_t *handle,
 
 static int config_integer(snd_config_t *n, long *val, int doit)
 {
-	int err = snd_config_get_integer(n, val);
+	long long lval;
+	int err = snd_config_get_llong(n, &lval, 0);
 	if (err < 0 && force_restore && doit) {
 		if (snd_config_get_type(n) != SND_CONFIG_TYPE_COMPOUND)
 			return err;
 		n = snd_config_iterator_entry(snd_config_iterator_first(n));
 		return config_integer(n, val, doit);
 	}
-	return err;
+	if (err < 0)
+		return err;
+	if (lval < INT_MIN || lval > INT_MAX)
+		return -ERANGE;
+	*val = lval;
+	return 0;
 }
 
 static int config_integer64(snd_config_t *n, long long *val, int doit)
 {
-	int err = snd_config_get_integer64(n, val);
+	int err = snd_config_get_llong(n, val, 0);
 	if (err < 0 && force_restore && doit) {
 		if (snd_config_get_type(n) != SND_CONFIG_TYPE_COMPOUND)
 			return err;
